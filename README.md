@@ -19,4 +19,4 @@ This plugin was originally based on the "Simple Amplifier" example plugin code.
 
 ## How to compile
 
-Install your distribution's `lv2-dev` package and run `./build.sh`.
+Install your distribution's `lv2-dev` package, init all submodules with `git submodule update --init` and run `./build.sh`.
