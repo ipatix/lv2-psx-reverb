@@ -1,5 +1,7 @@
 # PSX Reverb (LV2 Plugin)
 
+## Overview
+
 PSX Reverb is a small audio plugin for lv2 Hosts (I mainly use Carla). It is intended to emulate the PlayStation SPU's reverb algorithm.
 
 At the moment it only works correctly at 44100 Hz (48000 Hz still doesn't sound too much off) and only supports the "large studio" preset, which is used in quite a few games including "Star Ocean 2" and "Final Fantasy IX".
@@ -14,3 +16,7 @@ preset_load(psx_rev, (struct PsxReverbPreset *)preset_studio_large, preset_studi
 ```
 
 This plugin was originally based on the "Simple Amplifier" example plugin code.
+
+## How to compile
+
+Install your distribution's `lv2-dev` package and run `./build.sh`.
