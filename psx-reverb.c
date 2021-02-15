@@ -67,17 +67,9 @@ typedef enum {
    stored, since there is no additional instance data.
 */
 
-typedef struct {
-    float state;
-    float alpha;
-} low_pass_t;
-
 #define NUM_PRESETS 10
-
-/* original SPU memory is 512 KiB,
- * 256 KiB is sufficient for all available presets,
- * divide by sizeof(int16_t) to get actual sample count */
-#define SPU_BUF_COUNT_MAX (512 * 1024 / 2 / sizeof(int16_t))
+#define SPU_REV_RATE 22050
+#define SPU_REV_PRESET_LONGEST_COUNT (0x18040 / 2)
 
 typedef struct {
     // lv2 stuff
@@ -93,21 +85,21 @@ typedef struct {
     const float* port_main1_in;
     float*       port_main0_out;
     float*       port_main1_out;
-    // local data
+
+    // processing state data
     float        master;
     float        wet;
     int          preset;
     float        dry;
-    low_pass_t   lp_L;
-    low_pass_t   lp_R;
 
-    float        spu_buffer[SPU_BUF_COUNT_MAX];
+    float       *spu_buffer;
+    size_t       spu_buffer_count;
+    size_t       spu_buffer_count_mask;
 
-    float        tmp_bufL;
-    float        tmp_bufR;
-    bool         tmp_buf_filled;
+    uint32_t     BufferAddress;
 
-    uint32_t BufferAddress;
+    /* misc things */
+    float        rate;
 
     /* converted reverb parameters */
     uint32_t dAPF1;
@@ -168,6 +160,31 @@ static float s2f(int16_t v) {
     return (float)(v) / 32768.0f;
 }
 
+/* convert iir filter constant to center frequency */
+static float alpha2fc(float alpha, float samplerate) {
+    const double dt = 1.0 / samplerate;
+    const double fc_inv = 2.0 * M_PI * (dt / alpha  - dt);
+    return (float)(1.0 / fc_inv);
+}
+
+/* convert center frequency to iir filter constant */
+static float fc2alpha(float fc, float samplerate) {
+    const double dt = 1.0 / samplerate;
+    const double rc = 1.0 / (2.0 * M_PI * fc);
+    return (float)(dt / (rc + dt));
+}
+
+static uint32_t ceilpower2(uint32_t x) {
+    x--;
+    x |= x >> 1;
+    x |= x >> 2;
+    x |= x >> 4;
+    x |= x >> 8;
+    x |= x >> 16;
+    x++;
+    return x;
+}
+
 /**
    The `instantiate()` function is called by the host to create a new plugin
    instance.  The host passes the plugin descriptor, sample rate, and bundle
@@ -186,7 +203,7 @@ instantiate(const LV2_Descriptor*     descriptor,
 {
     PsxReverb* psxrev = (PsxReverb*)calloc(1, sizeof(PsxReverb));
 
-    // Scan host features for URID map
+    /* init logging */
     const char* missing = lv2_features_query(
         features,
         LV2_LOG__log,  &psxrev->logger.log, false,
@@ -196,6 +213,25 @@ instantiate(const LV2_Descriptor*     descriptor,
 
     if (missing) {
         lv2_log_error(&psxrev->logger, "Missing feature <%s>\n", missing);
+        free(psxrev);
+        return NULL;
+    }
+
+    /* low samplerates are not supported */
+    if (rate <= 1.0) {
+        lv2_log_error(&psxrev->logger, "Samplerate is too low: %f\n", rate);
+        free(psxrev);
+        return NULL;
+    }
+
+    psxrev->rate = (float)rate;
+
+    /* alloc reverb buffer */
+    psxrev->spu_buffer_count = ceilpower2((uint32_t)ceil(SPU_REV_PRESET_LONGEST_COUNT * (rate / SPU_REV_RATE)));
+    psxrev->spu_buffer_count_mask = psxrev->spu_buffer_count - 1; // <-- we can use this for quick circular buffer access
+    psxrev->spu_buffer = calloc(psxrev->spu_buffer_count, sizeof(float));
+    if (psxrev->spu_buffer == NULL) {
+        lv2_log_error(&psxrev->logger, "Could not allocate SPU buffer\n");
         free(psxrev);
         return NULL;
     }
@@ -265,24 +301,11 @@ activate(LV2_Handle instance)
     preset_load(psx_rev, psx_rev->preset);
     psx_rev->master = 1.0f;
     psx_rev->BufferAddress = 0;
-    psx_rev->lp_L.state = 0.0f;
-    psx_rev->lp_L.alpha = 0.707f;
-    psx_rev->lp_R.state = 0.0f;
-    psx_rev->lp_R.alpha = 0.707f;
-    psx_rev->tmp_buf_filled = false;
-    psx_rev->tmp_bufL = 0.0f;
-    psx_rev->tmp_bufR = 0.0f;
-    memset(&psx_rev->spu_buffer, 0, sizeof(psx_rev->spu_buffer));
+    memset(psx_rev->spu_buffer, 0, psx_rev->spu_buffer_count * sizeof(psx_rev->spu_buffer[0]));
 }
 
 /** Define a macro for converting a gain in dB to a coefficient. */
 #define DB_CO(g) ((g) > -90.0f ? powf(10.0f, (g) * 0.05f) : 0.0f)
-
-/* aux functions for run */
-float lp_process(low_pass_t *lp, float in) {
-    lp->state = lp->state + lp->alpha * (in - lp->state);
-    return lp->state;
-}
 
 /**
    The `run()` method is the main process function of the plugin.  It processes
@@ -312,71 +335,42 @@ run(LV2_Handle instance, uint32_t n_samples)
         rev->wet += 0.001f * (wet_coef - rev->wet);
         rev->master += 0.001f * (master_coef - rev->master);
 
-        /* samples are always processed in pairs, so we buffer one first */
-        if (rev->tmp_buf_filled) {
-            /* load second sample and process */
-#define mem(idx) (rev->spu_buffer[(unsigned)((idx) + rev->BufferAddress) % (unsigned)SPU_BUF_COUNT_MAX])
-            float l1 = rev->tmp_bufL;
-            float l2 = rev->port_main0_in[i];
-            float r1 = rev->tmp_bufR;
-            float r2 = rev->port_main1_in[i];
+#define mem(idx) (rev->spu_buffer[(unsigned)((idx) + rev->BufferAddress) & rev->spu_buffer_count_mask])
+        const float LeftInput  = rev->port_main0_in[i];
+        const float RightInput = rev->port_main1_in[i];
 
-            float LeftInput  = avg(l1, l2);
-            float RightInput = avg(r1, r2);
+        const float Lin = rev->vLIN * LeftInput;
+        const float Rin = rev->vRIN * RightInput;
 
-            float Lin = rev->vLIN * LeftInput;
-            float Rin = rev->vRIN * RightInput;
+        // same side reflection
+        mem(rev->mLSAME) = (Lin + mem(rev->dLSAME) * rev->vWALL - mem(rev->mLSAME-1)) * rev->vIIR + mem(rev->mLSAME-1);
+        mem(rev->mRSAME) = (Rin + mem(rev->dRSAME) * rev->vWALL - mem(rev->mRSAME-1)) * rev->vIIR + mem(rev->mRSAME-1);
 
-            // same side reflection
-            mem(rev->mLSAME) = (Lin + mem(rev->dLSAME) * rev->vWALL - mem(rev->mLSAME-1)) * rev->vIIR + mem(rev->mLSAME-1);
-            mem(rev->mRSAME) = (Rin + mem(rev->dRSAME) * rev->vWALL - mem(rev->mRSAME-1)) * rev->vIIR + mem(rev->mRSAME-1);
+        // different side reflection
+        mem(rev->mLDIFF) = (Lin + mem(rev->dRDIFF) * rev->vWALL - mem(rev->mLDIFF-1)) * rev->vIIR + mem(rev->mLDIFF-1);
+        mem(rev->mRDIFF) = (Rin + mem(rev->dLDIFF) * rev->vWALL - mem(rev->mRDIFF-1)) * rev->vIIR + mem(rev->mRDIFF-1);
 
-            // different side reflection
-            mem(rev->mLDIFF) = (Lin + mem(rev->dRDIFF) * rev->vWALL - mem(rev->mLDIFF-1)) * rev->vIIR + mem(rev->mLDIFF-1);
-            mem(rev->mRDIFF) = (Rin + mem(rev->dLDIFF) * rev->vWALL - mem(rev->mRDIFF-1)) * rev->vIIR + mem(rev->mRDIFF-1);
+        // early echo
+        float Lout = rev->vCOMB1 * mem(rev->mLCOMB1) + rev->vCOMB2 * mem(rev->mLCOMB2) + rev->vCOMB3 * mem(rev->mLCOMB3) + rev->vCOMB4 * mem(rev->mLCOMB4);
+        float Rout = rev->vCOMB1 * mem(rev->mRCOMB1) + rev->vCOMB2 * mem(rev->mRCOMB2) + rev->vCOMB3 * mem(rev->mRCOMB3) + rev->vCOMB4 * mem(rev->mRCOMB4);
 
-            // early echo
-            float Lout = rev->vCOMB1 * mem(rev->mLCOMB1) + rev->vCOMB2 * mem(rev->mLCOMB2) + rev->vCOMB3 * mem(rev->mLCOMB3) + rev->vCOMB4 * mem(rev->mLCOMB4);
-            float Rout = rev->vCOMB1 * mem(rev->mRCOMB1) + rev->vCOMB2 * mem(rev->mRCOMB2) + rev->vCOMB3 * mem(rev->mRCOMB3) + rev->vCOMB4 * mem(rev->mRCOMB4);
+        // late reverb APF1
+        Lout -= rev->vAPF1 * mem(rev->mLAPF1-rev->dAPF1); mem(rev->mLAPF1) = Lout; Lout = Lout * rev->vAPF1 + mem(rev->mLAPF1-rev->dAPF1);
+        Rout -= rev->vAPF1 * mem(rev->mRAPF1-rev->dAPF1); mem(rev->mRAPF1) = Rout; Rout = Rout * rev->vAPF1 + mem(rev->mRAPF1-rev->dAPF1);
 
-            // late reverb APF1
-            Lout -= rev->vAPF1 * mem(rev->mLAPF1-rev->dAPF1); mem(rev->mLAPF1) = Lout; Lout = Lout * rev->vAPF1 + mem(rev->mLAPF1-rev->dAPF1);
-            Rout -= rev->vAPF1 * mem(rev->mRAPF1-rev->dAPF1); mem(rev->mRAPF1) = Rout; Rout = Rout * rev->vAPF1 + mem(rev->mRAPF1-rev->dAPF1);
-
-            // late reverb APF2
-            Lout -= rev->vAPF2 * mem(rev->mLAPF2-rev->dAPF2); mem(rev->mLAPF2) = Lout; Lout = Lout * rev->vAPF2 + mem(rev->mLAPF2-rev->dAPF2);
-            Rout -= rev->vAPF2 * mem(rev->mRAPF2-rev->dAPF2); mem(rev->mRAPF2) = Rout; Rout = Rout * rev->vAPF2 + mem(rev->mRAPF2-rev->dAPF2);
+        // late reverb APF2
+        Lout -= rev->vAPF2 * mem(rev->mLAPF2-rev->dAPF2); mem(rev->mLAPF2) = Lout; Lout = Lout * rev->vAPF2 + mem(rev->mLAPF2-rev->dAPF2);
+        Rout -= rev->vAPF2 * mem(rev->mRAPF2-rev->dAPF2); mem(rev->mRAPF2) = Rout; Rout = Rout * rev->vAPF2 + mem(rev->mRAPF2-rev->dAPF2);
 #undef mem
 
-            //static float dbg = 0.0f;
-            //Lout = sinf(dbg) * rev->vCOMB1;
-            //Rout = sinf(dbg) * rev->vCOMB2;
-            //dbg += 0.1f;
+        // output to mixer
+        const float LeftOutput  = Lout;
+        const float RightOutput = Rout;
 
-            // output to mixer
-            float LeftOutput  = Lout * 1.0f;
-            float RightOutput = Rout * 1.0f;
+        rev->BufferAddress = ((rev->BufferAddress + 1) & rev->spu_buffer_count_mask);
 
-            rev->BufferAddress++;
-            if (rev->BufferAddress >= SPU_BUF_COUNT_MAX)
-                rev->BufferAddress = 0;
-
-            rev->port_main0_out[i] = (lp_process(&rev->lp_L, LeftOutput)  * rev->wet + l1 * rev->dry) * rev->master;
-            rev->tmp_bufL          = (lp_process(&rev->lp_L, LeftOutput)  * rev->wet + l2 * rev->dry) * rev->master;
-            rev->port_main1_out[i] = (lp_process(&rev->lp_R, RightOutput) * rev->wet + r1 * rev->dry) * rev->master;
-            rev->tmp_bufR          = (lp_process(&rev->lp_R, RightOutput) * rev->wet + r2 * rev->dry) * rev->master;
-            //rev->port_main0_out[i] = LeftOutput  * rev->wet + l1 * rev->dry;
-            //rev->tmp_bufL          = LeftOutput  * rev->wet + l2 * rev->dry;
-            //rev->port_main1_out[i] = RightOutput * rev->wet + r1 * rev->dry;
-            //rev->tmp_bufR          = RightOutput * rev->wet + r2 * rev->dry;
-            rev->tmp_buf_filled = false;
-        } else {
-            rev->port_main0_out[i] = rev->tmp_bufL;
-            rev->port_main1_out[i] = rev->tmp_bufR;
-            rev->tmp_bufL = rev->port_main0_in[i];
-            rev->tmp_bufR = rev->port_main1_in[i];
-            rev->tmp_buf_filled = true;
-        }
+        rev->port_main0_out[i] = (LeftOutput  * rev->wet + Lin * rev->dry) * rev->master;
+        rev->port_main1_out[i] = (RightOutput * rev->wet + Rin * rev->dry) * rev->master;
     }
 }
 
@@ -405,7 +399,10 @@ deactivate(LV2_Handle instance)
 static void
 cleanup(LV2_Handle instance)
 {
-    free(instance);
+    PsxReverb* rev = (PsxReverb*)instance;
+
+    free(rev->spu_buffer);
+    free(rev);
 }
 
 /**
@@ -506,11 +503,14 @@ void preset_load(PsxReverb *psx_rev, int preset_index) {
         return;
     }
 
+    float stretch_factor = psx_rev->rate / SPU_REV_RATE;
+
     PsxReverbPreset *preset = (PsxReverbPreset *)&presets[psx_rev->preset];
 
-    psx_rev->dAPF1   = preset->dAPF1 << 2;
-    psx_rev->dAPF2   = preset->dAPF2 << 2;
-    psx_rev->vIIR    = s2f(preset->vIIR);
+    psx_rev->dAPF1   = (uint32_t)((preset->dAPF1 << 2) * stretch_factor);
+    psx_rev->dAPF2   = (uint32_t)((preset->dAPF2 << 2) * stretch_factor);
+    // correct 22050 Hz IIR alpha to our actual rate
+    psx_rev->vIIR    = fc2alpha(alpha2fc(s2f(preset->vIIR), SPU_REV_RATE), psx_rev->rate);
     psx_rev->vCOMB1  = s2f(preset->vCOMB1);
     psx_rev->vCOMB2  = s2f(preset->vCOMB2);
     psx_rev->vCOMB3  = s2f(preset->vCOMB3);
@@ -518,30 +518,30 @@ void preset_load(PsxReverb *psx_rev, int preset_index) {
     psx_rev->vWALL   = s2f(preset->vWALL);
     psx_rev->vAPF1   = s2f(preset->vAPF1);
     psx_rev->vAPF2   = s2f(preset->vAPF2);
-    psx_rev->mLSAME  = preset->mLSAME << 2;
-    psx_rev->mRSAME  = preset->mRSAME << 2;
-    psx_rev->mLCOMB1 = preset->mLCOMB1 << 2;
-    psx_rev->mRCOMB1 = preset->mRCOMB1 << 2;
-    psx_rev->mLCOMB2 = preset->mLCOMB2 << 2;
-    psx_rev->mRCOMB2 = preset->mRCOMB2 << 2;
-    psx_rev->dLSAME  = preset->dLSAME << 2;
-    psx_rev->dRSAME  = preset->dRSAME << 2;
-    psx_rev->mLDIFF  = preset->mLDIFF << 2;
-    psx_rev->mRDIFF  = preset->mRDIFF << 2;
-    psx_rev->mLCOMB3 = preset->mLCOMB3 << 2;
-    psx_rev->mRCOMB3 = preset->mRCOMB3 << 2;
-    psx_rev->mLCOMB4 = preset->mLCOMB4 << 2;
-    psx_rev->mRCOMB4 = preset->mRCOMB4 << 2;
-    psx_rev->dLDIFF  = preset->dLDIFF << 2;
-    psx_rev->dRDIFF  = preset->dRDIFF << 2;
-    psx_rev->mLAPF1  = preset->mLAPF1 << 2;
-    psx_rev->mRAPF1  = preset->mRAPF1 << 2;
-    psx_rev->mLAPF2  = preset->mLAPF2 << 2;
-    psx_rev->mRAPF2  = preset->mRAPF2 << 2;
+    psx_rev->mLSAME  = (uint32_t)((preset->mLSAME << 2) * stretch_factor);
+    psx_rev->mRSAME  = (uint32_t)((preset->mRSAME << 2) * stretch_factor);
+    psx_rev->mLCOMB1 = (uint32_t)((preset->mLCOMB1 << 2) * stretch_factor);
+    psx_rev->mRCOMB1 = (uint32_t)((preset->mRCOMB1 << 2) * stretch_factor);
+    psx_rev->mLCOMB2 = (uint32_t)((preset->mLCOMB2 << 2) * stretch_factor);
+    psx_rev->mRCOMB2 = (uint32_t)((preset->mRCOMB2 << 2) * stretch_factor);
+    psx_rev->dLSAME  = (uint32_t)((preset->dLSAME << 2) * stretch_factor);
+    psx_rev->dRSAME  = (uint32_t)((preset->dRSAME << 2) * stretch_factor);
+    psx_rev->mLDIFF  = (uint32_t)((preset->mLDIFF << 2) * stretch_factor);
+    psx_rev->mRDIFF  = (uint32_t)((preset->mRDIFF << 2) * stretch_factor);
+    psx_rev->mLCOMB3 = (uint32_t)((preset->mLCOMB3 << 2) * stretch_factor);
+    psx_rev->mRCOMB3 = (uint32_t)((preset->mRCOMB3 << 2) * stretch_factor);
+    psx_rev->mLCOMB4 = (uint32_t)((preset->mLCOMB4 << 2) * stretch_factor);
+    psx_rev->mRCOMB4 = (uint32_t)((preset->mRCOMB4 << 2) * stretch_factor);
+    psx_rev->dLDIFF  = (uint32_t)((preset->dLDIFF << 2) * stretch_factor);
+    psx_rev->dRDIFF  = (uint32_t)((preset->dRDIFF << 2) * stretch_factor);
+    psx_rev->mLAPF1  = (uint32_t)((preset->mLAPF1 << 2) * stretch_factor);
+    psx_rev->mRAPF1  = (uint32_t)((preset->mRAPF1 << 2) * stretch_factor);
+    psx_rev->mLAPF2  = (uint32_t)((preset->mLAPF2 << 2) * stretch_factor);
+    psx_rev->mRAPF2  = (uint32_t)((preset->mRAPF2 << 2) * stretch_factor);
     psx_rev->vLIN    = s2f(preset->vLIN);
     psx_rev->vRIN    = s2f(preset->vRIN);
 
-    memset(psx_rev->spu_buffer, 0, sizeof(psx_rev->spu_buffer));
+    memset(psx_rev->spu_buffer, 0, psx_rev->spu_buffer_count * sizeof(psx_rev->spu_buffer[0]));
 }
 
 static const uint16_t presets[NUM_PRESETS][0x20] = {
