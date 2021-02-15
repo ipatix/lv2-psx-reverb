@@ -4,6 +4,8 @@
 
 PSX Reverb is a small audio plugin for LV2 hosts (I like to use Carla). It is intended to emulate the PlayStation SPU's reverb algorithm.
 
+![psxreverb](https://user-images.githubusercontent.com/8502545/107978482-2084ac80-6fbd-11eb-9ff9-16f2c6a050a7.png)
+
 It now works for all samplerates and compensates for different buffer sizes and coefficient changes accordingly.
 10 different presets are available which are the ones you'll find in most commercial games.
 Games will likely use one of the available algorithms but usually they vary the wet level, so you may have to tweak around with that.
