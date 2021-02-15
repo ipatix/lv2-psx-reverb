@@ -66,6 +66,9 @@ typedef struct {
     float alpha;
 } low_pass_t;
 
+// must be a power of two!!!
+#define SPU_BUF_COUNT_MAX 0x8000
+
 typedef struct {
     // Port buffers
     const float* port_wet;
@@ -80,8 +83,7 @@ typedef struct {
     low_pass_t   lp_L;
     low_pass_t   lp_R;
 
-    float        spu_buffer[0x8000];
-    size_t       spu_buffer_count;
+    float        spu_buffer[SPU_BUF_COUNT_MAX];
 
     float        tmp_bufL;
     float        tmp_bufR;
@@ -155,7 +157,7 @@ static const uint16_t preset_reverb_off[0x20];
 static const uint32_t preset_reverb_off_size;
 
 struct PsxReverbPreset;
-static void preset_load(PsxReverb *, struct PsxReverbPreset *, uint32_t);
+static void preset_load(PsxReverb *, struct PsxReverbPreset *);
 
 static float avg(float a, float b) {
     return (a + b) / 2.0f;
@@ -258,7 +260,7 @@ activate(LV2_Handle instance)
     psx_rev->tmp_buf_filled = false;
     psx_rev->tmp_bufL = 0.0f;
     psx_rev->tmp_bufR = 0.0f;
-    preset_load(psx_rev, (struct PsxReverbPreset *)preset_studio_large, preset_studio_large_size);
+    preset_load(psx_rev, (struct PsxReverbPreset *)preset_studio_large);
     memset(&psx_rev->spu_buffer, 0, sizeof(psx_rev->spu_buffer));
 }
 
@@ -266,15 +268,6 @@ activate(LV2_Handle instance)
 #define DB_CO(g) ((g) > -90.0f ? powf(10.0f, (g) * 0.05f) : 0.0f)
 
 /* aux functions for run */
-float *spu_buffer_mem(PsxReverb* psx_rev, int idx) {
-    int index = (int)psx_rev->BufferAddress + idx;
-    if (index >= (int)psx_rev->spu_buffer_count)
-        index -= (int)psx_rev->spu_buffer_count;
-    if (index < 0)
-        index += (int)psx_rev->spu_buffer_count;
-    return &psx_rev->spu_buffer[index];
-}
-
 float lp_process(low_pass_t *lp, float in) {
     lp->state = lp->state + lp->alpha * (in - lp->state);
     return lp->state;
@@ -303,7 +296,7 @@ run(LV2_Handle instance, uint32_t n_samples)
         /* samples are always processed in pairs, so we buffer one first */
         if (rev->tmp_buf_filled) {
             /* load second sample and process */
-#define mem(idx) (*spu_buffer_mem(rev, (idx)))
+#define mem(idx) (rev->spu_buffer[(unsigned)((idx) + rev->BufferAddress) % (unsigned)SPU_BUF_COUNT_MAX])
             float l1 = rev->tmp_bufL;
             float l2 = rev->port_main0_in[i];
             float r1 = rev->tmp_bufR;
@@ -346,7 +339,7 @@ run(LV2_Handle instance, uint32_t n_samples)
             float RightOutput = Rout * 1.0f;
 
             rev->BufferAddress++;
-            if (rev->BufferAddress >= rev->spu_buffer_count)
+            if (rev->BufferAddress >= SPU_BUF_COUNT_MAX)
                 rev->BufferAddress = 0;
 
             rev->port_main0_out[i] = lp_process(&rev->lp_L, LeftOutput)  * rev->wet_state + l1 * rev->dry_state;
@@ -485,9 +478,7 @@ typedef struct PsxReverbPreset {
     int16_t  vRIN;
 } PsxReverbPreset;
 
-void preset_load(PsxReverb *psx_rev, PsxReverbPreset *preset, uint32_t size) {
-    psx_rev->spu_buffer_count = (size >> 1);
-
+void preset_load(PsxReverb *psx_rev, PsxReverbPreset *preset) {
     psx_rev->dAPF1   = preset->dAPF1 << 2;
     psx_rev->dAPF2   = preset->dAPF2 << 2;
     psx_rev->vIIR    = s2f(preset->vIIR);
