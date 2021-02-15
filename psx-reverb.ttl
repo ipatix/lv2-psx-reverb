@@ -7,6 +7,7 @@
 @prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix units: <http://lv2plug.in/ns/extensions/units#> .
+@prefix epp:   <http://lv2plug.in/ns/ext/port-props#> .
 
 # First the type of the plugin is described.  All plugins must explicitly list
 # `lv2:Plugin` as a type.  A more specific type should also be given, where
@@ -58,26 +59,58 @@
 		units:unit units:db
 	] , [
 		a lv2:InputPort ,
-			lv2:AudioPort ;
+			lv2:ControlPort ;
 		lv2:index 2 ;
+		lv2:symbol "preset" ;
+		lv2:name "Preset" ;
+        lv2:portProperty epp:hasStrictBounds ;
+        lv2:portProperty lv2:integer ;
+        lv2:portProperty lv2:enumeration ;
+        lv2:scalePoint [ rdfs:label "Room"; rdf:value 0 ] ;
+        lv2:scalePoint [ rdfs:label "Studio Small"; rdf:value 1 ] ;
+        lv2:scalePoint [ rdfs:label "Studio Medium"; rdf:value 2 ] ;
+        lv2:scalePoint [ rdfs:label "Studio Large"; rdf:value 3 ] ;
+        lv2:scalePoint [ rdfs:label "Hall"; rdf:value 4 ] ;
+        lv2:scalePoint [ rdfs:label "Half Echo"; rdf:value 5 ] ;
+        lv2:scalePoint [ rdfs:label "Space Echo"; rdf:value 6 ] ;
+        lv2:scalePoint [ rdfs:label "Chaos Echo"; rdf:value 7 ] ;
+        lv2:scalePoint [ rdfs:label "Delay"; rdf:value 8 ] ;
+        lv2:scalePoint [ rdfs:label "Off"; rdf:value 9 ] ;
+        lv2:default 0 ;
+        lv2:minimum 0 ;
+        lv2:maximum 9 ;
+	] , [
+		a lv2:InputPort ,
+			lv2:ControlPort ;
+		lv2:index 3 ;
+		lv2:symbol "master" ;
+		lv2:name "Master" ;
+		lv2:default 0.0 ;
+		lv2:minimum -30.0 ;
+		lv2:maximum 12.0 ;
+		units:unit units:db
+	] , [
+		a lv2:InputPort ,
+			lv2:AudioPort ;
+		lv2:index 4 ;
 		lv2:symbol "main_in_0" ;
 		lv2:name "main-in-L"
 	] , [
 		a lv2:InputPort ,
 			lv2:AudioPort ;
-		lv2:index 3 ;
+		lv2:index 5 ;
 		lv2:symbol "main_in_1" ;
 		lv2:name "main-in-R"
     ] , [
 		a lv2:OutputPort ,
 			lv2:AudioPort ;
-		lv2:index 4 ;
+		lv2:index 6 ;
 		lv2:symbol "main_out_0" ;
 		lv2:name "main-out-L"
     ] , [
 		a lv2:OutputPort ,
 			lv2:AudioPort ;
-		lv2:index 5 ;
+		lv2:index 7 ;
 		lv2:symbol "main_out_1" ;
 		lv2:name "main-out-R"
 	] .

@@ -35,7 +35,7 @@ def build(bld):
         LIB_EXT      = bld.env.LV2_LIB_EXT)
 
     # Copy other data files to build bundle (build/psx-reverb.lv2)
-    for i in ['psx-reverb.ttl']:
+    for i in ['psx-reverb.ttl', 'presets.ttl']:
         bld(features     = 'subst',
             is_copy      = True,
             source       = i,

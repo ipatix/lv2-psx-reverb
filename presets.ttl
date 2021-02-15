@@ -1,0 +1,16 @@
+@prefix lv2p:  <http://lv2plug.in/ns/ext/presets#> .
+
+<http://github.com/ipatix/lv2-psx-reverb/ffix>
+    a lv2p:Preset ;
+    rdfs:label "Final Fantasy IX" ;
+    lv2:appliesTo <http://github.com/ipatix/lv2-psx-reverb> ;
+    lv2:port [
+        lv2.symbol "wet" ;
+        lv2p.value -9.37
+    ] , [
+        lv2.symbol "dry" ;
+        lv2p.value 0.0
+    ] , [
+        lv2.symbol "preset" ;
+        lv2p.value 3
+    ] .

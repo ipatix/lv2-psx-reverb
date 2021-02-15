@@ -22,6 +22,7 @@
 # written instead of `<http://lv2plug.in/ns/lv2core#Plugin>`.
 
 @prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix lv2p:  <http://lv2plug.in/ns/ext/presets#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
 # ==== Describing a Plugin ====
@@ -37,12 +38,14 @@
 # |================================================================
 
 # Firstly, `<http://lv2plug.in/plugins/eg-amp>` is an LV2 plugin:
-<http://github.com/ipatix/lv2-psx-reverb> a lv2:Plugin .
+<http://github.com/ipatix/lv2-psx-reverb>
+    a lv2:Plugin .
 
 # The predicate ```a`'' is a Turtle shorthand for `rdf:type`.
 
 # The binary of that plugin can be found at `<amp.ext>`:
-<http://github.com/ipatix/lv2-psx-reverb> lv2:binary <psx-reverb@LIB_EXT@> .
+<http://github.com/ipatix/lv2-psx-reverb>
+    lv2:binary <psx-reverb@LIB_EXT@> .
 
 # This file is a template; the token `@LIB_EXT@` is replaced by the build
 # system with the appropriate extension for the current platform before
@@ -52,7 +55,8 @@
 # directory as this manifest.
 
 # Finally, more information about this plugin can be found in `<psx-reverb.ttl>`:
-<http://github.com/ipatix/lv2-psx-reverb> rdfs:seeAlso <psx-reverb.ttl> .
+<http://github.com/ipatix/lv2-psx-reverb>
+    rdfs:seeAlso <psx-reverb.ttl> .
 
 # ==== Abbreviation ====
 #
@@ -63,6 +67,11 @@
 # so:
 
 <http://github.com/ipatix/lv2-psx-reverb>
-	a lv2:Plugin ;
-	lv2:binary <psx-reverb@LIB_EXT@>  ;
-	rdfs:seeAlso <psx-reverb.ttl> .
+    a lv2:Plugin ;
+    lv2:binary <psx-reverb@LIB_EXT@>  ;
+    rdfs:seeAlso <psx-reverb.ttl> .
+
+<http://github.com/ipatix/lv2-psx-reverb/ffix>
+    a lv2p:Plugin ;
+    lv2:appliesTo <http://github.com/ipatix/lv2-psx-reverb> ;
+    rdfs:seeAlso <presets.ttl> .

@@ -23,6 +23,9 @@
    included, in this case `lv2.h`.
 */
 #include "lv2/core/lv2.h"
+#include "lv2/core/lv2_util.h"
+#include "lv2/log/log.h"
+#include "lv2/log/logger.h"
 
 /** Include standard C headers */
 #include <math.h>
@@ -31,6 +34,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <assert.h>
+#include <stdio.h>
 
 /**
    The URI is the identifier for a plugin, and how the host associates this
@@ -39,7 +43,7 @@
    file is a good convention to follow.  If this URI does not match that used
    in the data files, the host will fail to load the plugin.
 */
-#define AMP_URI "http://github.com/ipatix/lv2-psx-reverb"
+#define PSX_REV_URI "http://github.com/ipatix/lv2-psx-reverb"
 
 /**
    In code, ports are referred to by index.  An enumeration of port indices
@@ -48,10 +52,12 @@
 typedef enum {
     PSX_REV_WET = 0,
     PSX_REV_DRY = 1,
-    PSX_REV_MAIN0_IN = 2,
-    PSX_REV_MAIN1_IN = 3,
-    PSX_REV_MAIN0_OUT = 4,
-    PSX_REV_MAIN1_OUT = 5,
+    PSX_REV_PRESET = 2,
+    PSX_REV_MASTER = 3,
+    PSX_REV_MAIN0_IN = 4,
+    PSX_REV_MAIN1_IN = 5,
+    PSX_REV_MAIN0_OUT = 6,
+    PSX_REV_MAIN1_OUT = 7,
 } PortIndex;
 
 /**
@@ -66,20 +72,32 @@ typedef struct {
     float alpha;
 } low_pass_t;
 
-// must be a power of two!!!
-#define SPU_BUF_COUNT_MAX 0x8000
+#define NUM_PRESETS 10
+
+/* original SPU memory is 512 KiB,
+ * 256 KiB is sufficient for all available presets,
+ * divide by sizeof(int16_t) to get actual sample count */
+#define SPU_BUF_COUNT_MAX (512 * 1024 / 2 / sizeof(int16_t))
 
 typedef struct {
+    // lv2 stuff
+    LV2_URID_Map*  map;     // URID map feature
+    LV2_Log_Logger logger;  // Logger API      
+
     // Port buffers
     const float* port_wet;
     const float* port_dry;
+    const float* port_preset;   // <-- this is technically an int
+    const float* port_master;
     const float* port_main0_in;
     const float* port_main1_in;
     float*       port_main0_out;
     float*       port_main1_out;
     // local data
-    float        wet_state;
-    float        dry_state;
+    float        master;
+    float        wet;
+    int          preset;
+    float        dry;
     low_pass_t   lp_L;
     low_pass_t   lp_R;
 
@@ -126,38 +144,9 @@ typedef struct {
     float    vRIN;
 } PsxReverb;
 
-static const uint16_t preset_room[0x20];
-static const uint32_t preset_room_size;
+static const uint16_t presets[10][0x20];
 
-static const uint16_t preset_studio_small[0x20];
-static const uint32_t preset_studio_small_size;
-
-static const uint16_t preset_studio_medium[0x20];
-static const uint32_t preset_studio_medium_size;
-
-static const uint16_t preset_studio_large[0x20];
-static const uint32_t preset_studio_large_size;
-
-static const uint16_t preset_hall[0x20];
-static const uint32_t preset_hall_size;
-
-static const uint16_t preset_half_echo[0x20];
-static const uint32_t preset_half_echo_size;
-
-static const uint16_t preset_space_echo[0x20];
-static const uint32_t preset_space_echo_size;
-
-static const uint16_t preset_chaos_echo[0x20];
-static const uint32_t preset_chaos_echo_size;
-
-static const uint16_t preset_delay[0x20];
-static const uint32_t preset_delay_size;
-
-static const uint16_t preset_reverb_off[0x20];
-static const uint32_t preset_reverb_off_size;
-
-struct PsxReverbPreset;
-static void preset_load(PsxReverb *, struct PsxReverbPreset *);
+static void preset_load(PsxReverb *, int); 
 
 static float avg(float a, float b) {
     return (a + b) / 2.0f;
@@ -195,9 +184,23 @@ instantiate(const LV2_Descriptor*     descriptor,
             const char*               bundle_path,
             const LV2_Feature* const* features)
 {
-    PsxReverb* amp = (PsxReverb*)calloc(1, sizeof(PsxReverb));
+    PsxReverb* psxrev = (PsxReverb*)calloc(1, sizeof(PsxReverb));
 
-    return (LV2_Handle)amp;
+    // Scan host features for URID map
+    const char* missing = lv2_features_query(
+        features,
+        LV2_LOG__log,  &psxrev->logger.log, false,
+        LV2_URID__map, &psxrev->map, true,
+        NULL);
+    lv2_log_logger_set_map(&psxrev->logger, psxrev->map);
+
+    if (missing) {
+        lv2_log_error(&psxrev->logger, "Missing feature <%s>\n", missing);
+        free(psxrev);
+        return NULL;
+    }
+
+    return (LV2_Handle)psxrev;
 }
 
 /**
@@ -221,6 +224,12 @@ connect_port(LV2_Handle instance,
         break;
     case PSX_REV_DRY:
         psx_rev->port_dry = (const float*)data;
+        break;
+    case PSX_REV_PRESET:
+        psx_rev->port_preset = (const float*)data;
+        break;
+    case PSX_REV_MASTER:
+        psx_rev->port_master = (const float*)data;
         break;
     case PSX_REV_MAIN0_IN:
         psx_rev->port_main0_in = (const float*)data;
@@ -250,8 +259,11 @@ static void
 activate(LV2_Handle instance)
 {
     PsxReverb* psx_rev = (PsxReverb*)instance;
-    psx_rev->dry_state = 1.0f;
-    psx_rev->wet_state = 1.0f;
+    psx_rev->dry = 1.0f;
+    psx_rev->wet = 1.0f;
+    psx_rev->preset = 0;
+    preset_load(psx_rev, psx_rev->preset);
+    psx_rev->master = 1.0f;
     psx_rev->BufferAddress = 0;
     psx_rev->lp_L.state = 0.0f;
     psx_rev->lp_L.alpha = 0.707f;
@@ -260,7 +272,6 @@ activate(LV2_Handle instance)
     psx_rev->tmp_buf_filled = false;
     psx_rev->tmp_bufL = 0.0f;
     psx_rev->tmp_bufR = 0.0f;
-    preset_load(psx_rev, (struct PsxReverbPreset *)preset_studio_large);
     memset(&psx_rev->spu_buffer, 0, sizeof(psx_rev->spu_buffer));
 }
 
@@ -284,14 +295,22 @@ run(LV2_Handle instance, uint32_t n_samples)
 {
     PsxReverb* rev = (PsxReverb*)instance;
 
+    /* load preset if it was changed */
+    int preset = (int)*rev->port_preset;
+    if (preset != rev->preset)
+        preset_load(rev, preset);
+
     const float wet_gain = *(rev->port_wet);
     const float wet_coef = DB_CO(wet_gain);
     const float dry_gain = *(rev->port_dry);
     const float dry_coef = DB_CO(dry_gain);
+    const float master_gain = *(rev->port_master);
+    const float master_coef = DB_CO(master_gain);
 
     for (uint32_t i = 0; i < n_samples; i++) {
-        rev->dry_state += 0.001f * (dry_coef - rev->dry_state);
-        rev->wet_state += 0.001f * (wet_coef - rev->wet_state);
+        rev->dry += 0.001f * (dry_coef - rev->dry);
+        rev->wet += 0.001f * (wet_coef - rev->wet);
+        rev->master += 0.001f * (master_coef - rev->master);
 
         /* samples are always processed in pairs, so we buffer one first */
         if (rev->tmp_buf_filled) {
@@ -342,14 +361,14 @@ run(LV2_Handle instance, uint32_t n_samples)
             if (rev->BufferAddress >= SPU_BUF_COUNT_MAX)
                 rev->BufferAddress = 0;
 
-            rev->port_main0_out[i] = lp_process(&rev->lp_L, LeftOutput)  * rev->wet_state + l1 * rev->dry_state;
-            rev->tmp_bufL          = lp_process(&rev->lp_L, LeftOutput)  * rev->wet_state + l2 * rev->dry_state;
-            rev->port_main1_out[i] = lp_process(&rev->lp_R, RightOutput) * rev->wet_state + r1 * rev->dry_state;
-            rev->tmp_bufR          = lp_process(&rev->lp_R, RightOutput) * rev->wet_state + r2 * rev->dry_state;
-            //rev->port_main0_out[i] = LeftOutput  * rev->wet_state + l1 * rev->dry_state;
-            //rev->tmp_bufL          = LeftOutput  * rev->wet_state + l2 * rev->dry_state;
-            //rev->port_main1_out[i] = RightOutput * rev->wet_state + r1 * rev->dry_state;
-            //rev->tmp_bufR          = RightOutput * rev->wet_state + r2 * rev->dry_state;
+            rev->port_main0_out[i] = (lp_process(&rev->lp_L, LeftOutput)  * rev->wet + l1 * rev->dry) * rev->master;
+            rev->tmp_bufL          = (lp_process(&rev->lp_L, LeftOutput)  * rev->wet + l2 * rev->dry) * rev->master;
+            rev->port_main1_out[i] = (lp_process(&rev->lp_R, RightOutput) * rev->wet + r1 * rev->dry) * rev->master;
+            rev->tmp_bufR          = (lp_process(&rev->lp_R, RightOutput) * rev->wet + r2 * rev->dry) * rev->master;
+            //rev->port_main0_out[i] = LeftOutput  * rev->wet + l1 * rev->dry;
+            //rev->tmp_bufL          = LeftOutput  * rev->wet + l2 * rev->dry;
+            //rev->port_main1_out[i] = RightOutput * rev->wet + r1 * rev->dry;
+            //rev->tmp_bufR          = RightOutput * rev->wet + r2 * rev->dry;
             rev->tmp_buf_filled = false;
         } else {
             rev->port_main0_out[i] = rev->tmp_bufL;
@@ -411,7 +430,7 @@ extension_data(const char* uri)
    library constructors and destructors to clean up properly.
 */
 static const LV2_Descriptor descriptor = {
-    AMP_URI,
+    PSX_REV_URI,
     instantiate,
     connect_port,
     activate,
@@ -478,7 +497,17 @@ typedef struct PsxReverbPreset {
     int16_t  vRIN;
 } PsxReverbPreset;
 
-void preset_load(PsxReverb *psx_rev, PsxReverbPreset *preset) {
+void preset_load(PsxReverb *psx_rev, int preset_index) {
+    // even if loading preset fails, set the ID regardless so we don't get log spam
+    psx_rev->preset = preset_index;
+
+    if (preset_index >= NUM_PRESETS) {
+        lv2_log_error(&psx_rev->logger, "Invalid Preset: %d\n", preset_index);
+        return;
+    }
+
+    PsxReverbPreset *preset = (PsxReverbPreset *)&presets[psx_rev->preset];
+
     psx_rev->dAPF1   = preset->dAPF1 << 2;
     psx_rev->dAPF2   = preset->dAPF2 << 2;
     psx_rev->vIIR    = s2f(preset->vIIR);
@@ -511,93 +540,79 @@ void preset_load(PsxReverb *psx_rev, PsxReverbPreset *preset) {
     psx_rev->mRAPF2  = preset->mRAPF2 << 2;
     psx_rev->vLIN    = s2f(preset->vLIN);
     psx_rev->vRIN    = s2f(preset->vRIN);
+
+    memset(psx_rev->spu_buffer, 0, sizeof(psx_rev->spu_buffer));
 }
 
-static const uint32_t preset_room_size = 0x26C0;
-static const uint16_t preset_room[0x20] = {
-    0x007D, 0x005B, 0x6D80, 0x54B8, 0xBED0, 0x0000, 0x0000, 0xBA80,
-    0x5800, 0x5300, 0x04D6, 0x0333, 0x03F0, 0x0227, 0x0374, 0x01EF,
-    0x0334, 0x01B5, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x0000, 0x01B4, 0x0136, 0x00B8, 0x005C, 0x8000, 0x8000,
-};
-
-
-static const uint32_t preset_studio_small_size = 0x1F40;
-static const uint16_t preset_studio_small[0x20] = {
-    0x0033, 0x0025, 0x70F0, 0x4FA8, 0xBCE0, 0x4410, 0xC0F0, 0x9C00,
-    0x5280, 0x4EC0, 0x03E4, 0x031B, 0x03A4, 0x02AF, 0x0372, 0x0266,
-    0x031C, 0x025D, 0x025C, 0x018E, 0x022F, 0x0135, 0x01D2, 0x00B7,
-    0x018F, 0x00B5, 0x00B4, 0x0080, 0x004C, 0x0026, 0x8000, 0x8000,
-};
-
-
-static const uint32_t preset_studio_medium_size = 0x4840;
-static const uint16_t preset_studio_medium[0x20] = {
-    0x00B1, 0x007F, 0x70F0, 0x4FA8, 0xBCE0, 0x4510, 0xBEF0, 0xB4C0,
-    0x5280, 0x4EC0, 0x0904, 0x076B, 0x0824, 0x065F, 0x07A2, 0x0616,
-    0x076C, 0x05ED, 0x05EC, 0x042E, 0x050F, 0x0305, 0x0462, 0x02B7,
-    0x042F, 0x0265, 0x0264, 0x01B2, 0x0100, 0x0080, 0x8000, 0x8000,
-};
-
-
-static const uint32_t preset_studio_large_size = 0x6FE0;
-static const uint16_t preset_studio_large[0x20] = {
-    0x00E3, 0x00A9, 0x6F60, 0x4FA8, 0xBCE0, 0x4510, 0xBEF0, 0xA680,
-    0x5680, 0x52C0, 0x0DFB, 0x0B58, 0x0D09, 0x0A3C, 0x0BD9, 0x0973,
-    0x0B59, 0x08DA, 0x08D9, 0x05E9, 0x07EC, 0x04B0, 0x06EF, 0x03D2,
-    0x05EA, 0x031D, 0x031C, 0x0238, 0x0154, 0x00AA, 0x8000, 0x8000,
-};
-
-
-static const uint32_t preset_hall_size = 0xADE0;
-static const uint16_t preset_hall[0x20] = {
-    0x01A5, 0x0139, 0x6000, 0x5000, 0x4C00, 0xB800, 0xBC00, 0xC000,
-    0x6000, 0x5C00, 0x15BA, 0x11BB, 0x14C2, 0x10BD, 0x11BC, 0x0DC1,
-    0x11C0, 0x0DC3, 0x0DC0, 0x09C1, 0x0BC4, 0x07C1, 0x0A00, 0x06CD,
-    0x09C2, 0x05C1, 0x05C0, 0x041A, 0x0274, 0x013A, 0x8000, 0x8000,
-};
-
-
-static const uint32_t preset_half_echo_size = 0x3C00;
-static const uint16_t preset_half_echo[0x20] = {
-    0x0017, 0x0013, 0x70F0, 0x4FA8, 0xBCE0, 0x4510, 0xBEF0, 0x8500,
-    0x5F80, 0x54C0, 0x0371, 0x02AF, 0x02E5, 0x01DF, 0x02B0, 0x01D7,
-    0x0358, 0x026A, 0x01D6, 0x011E, 0x012D, 0x00B1, 0x011F, 0x0059,
-    0x01A0, 0x00E3, 0x0058, 0x0040, 0x0028, 0x0014, 0x8000, 0x8000,
-};
-
-
-static const uint32_t preset_space_echo_size = 0xF6C0;
-static const uint16_t preset_space_echo[0x20] = {
-    0x033D, 0x0231, 0x7E00, 0x5000, 0xB400, 0xB000, 0x4C00, 0xB000,
-    0x6000, 0x5400, 0x1ED6, 0x1A31, 0x1D14, 0x183B, 0x1BC2, 0x16B2,
-    0x1A32, 0x15EF, 0x15EE, 0x1055, 0x1334, 0x0F2D, 0x11F6, 0x0C5D,
-    0x1056, 0x0AE1, 0x0AE0, 0x07A2, 0x0464, 0x0232, 0x8000, 0x8000,
-};
-
-
-static const uint32_t preset_chaos_echo_size = 0x18040;
-static const uint16_t preset_chaos_echo[0x20] = {
-    0x0001, 0x0001, 0x7FFF, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x8100,
-    0x0000, 0x0000, 0x1FFF, 0x0FFF, 0x1005, 0x0005, 0x0000, 0x0000,
-    0x1005, 0x0005, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x0000, 0x1004, 0x1002, 0x0004, 0x0002, 0x8000, 0x8000,
-};
-
-
-static const uint32_t preset_delay_size = 0x18040;
-static const uint16_t preset_delay[0x20] = {
-    0x0001, 0x0001, 0x7FFF, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x0000, 0x1FFF, 0x0FFF, 0x1005, 0x0005, 0x0000, 0x0000,
-    0x1005, 0x0005, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x0000, 0x1004, 0x1002, 0x0004, 0x0002, 0x8000, 0x8000,
-};
-
-
-static const uint32_t preset_reverb_off_size = 0x10;
-static const uint16_t preset_reverb_off[0x20] = {
-    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x0000, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001,
-    0x0000, 0x0000, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001,
-    0x0000, 0x0000, 0x0001, 0x0001, 0x0001, 0x0001, 0x0000, 0x0000,
+static const uint16_t presets[NUM_PRESETS][0x20] = {
+    {
+        /* Name: Room, SPU mem required: 0x26C0 */
+        0x007D, 0x005B, 0x6D80, 0x54B8, 0xBED0, 0x0000, 0x0000, 0xBA80,
+        0x5800, 0x5300, 0x04D6, 0x0333, 0x03F0, 0x0227, 0x0374, 0x01EF,
+        0x0334, 0x01B5, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x01B4, 0x0136, 0x00B8, 0x005C, 0x8000, 0x8000,
+    },
+    {
+        /* Name: Studio Small, SPU mem required: 0x1F40 */
+        0x0033, 0x0025, 0x70F0, 0x4FA8, 0xBCE0, 0x4410, 0xC0F0, 0x9C00,
+        0x5280, 0x4EC0, 0x03E4, 0x031B, 0x03A4, 0x02AF, 0x0372, 0x0266,
+        0x031C, 0x025D, 0x025C, 0x018E, 0x022F, 0x0135, 0x01D2, 0x00B7,
+        0x018F, 0x00B5, 0x00B4, 0x0080, 0x004C, 0x0026, 0x8000, 0x8000,
+    },
+    {
+        /* Name: Studio Medium, SPU mem required: 0x4840 */
+        0x00B1, 0x007F, 0x70F0, 0x4FA8, 0xBCE0, 0x4510, 0xBEF0, 0xB4C0,
+        0x5280, 0x4EC0, 0x0904, 0x076B, 0x0824, 0x065F, 0x07A2, 0x0616,
+        0x076C, 0x05ED, 0x05EC, 0x042E, 0x050F, 0x0305, 0x0462, 0x02B7,
+        0x042F, 0x0265, 0x0264, 0x01B2, 0x0100, 0x0080, 0x8000, 0x8000,
+    },
+    {
+        /* Name: Studio Large, SPU mem required: 0x6FE0*/
+        0x00E3, 0x00A9, 0x6F60, 0x4FA8, 0xBCE0, 0x4510, 0xBEF0, 0xA680,
+        0x5680, 0x52C0, 0x0DFB, 0x0B58, 0x0D09, 0x0A3C, 0x0BD9, 0x0973,
+        0x0B59, 0x08DA, 0x08D9, 0x05E9, 0x07EC, 0x04B0, 0x06EF, 0x03D2,
+        0x05EA, 0x031D, 0x031C, 0x0238, 0x0154, 0x00AA, 0x8000, 0x8000,
+    },
+    {
+        /* Name: Hall, SPU mem required: 0xADE0 */
+        0x01A5, 0x0139, 0x6000, 0x5000, 0x4C00, 0xB800, 0xBC00, 0xC000,
+        0x6000, 0x5C00, 0x15BA, 0x11BB, 0x14C2, 0x10BD, 0x11BC, 0x0DC1,
+        0x11C0, 0x0DC3, 0x0DC0, 0x09C1, 0x0BC4, 0x07C1, 0x0A00, 0x06CD,
+        0x09C2, 0x05C1, 0x05C0, 0x041A, 0x0274, 0x013A, 0x8000, 0x8000,
+    },
+    {
+        /* Name: Half Echo, SPU mem required: 0x3C00 */
+        0x0017, 0x0013, 0x70F0, 0x4FA8, 0xBCE0, 0x4510, 0xBEF0, 0x8500,
+        0x5F80, 0x54C0, 0x0371, 0x02AF, 0x02E5, 0x01DF, 0x02B0, 0x01D7,
+        0x0358, 0x026A, 0x01D6, 0x011E, 0x012D, 0x00B1, 0x011F, 0x0059,
+        0x01A0, 0x00E3, 0x0058, 0x0040, 0x0028, 0x0014, 0x8000, 0x8000,
+    },
+    {
+        /* Name: Space Echo, SPU mem required: 0xF6C0 */
+        0x033D, 0x0231, 0x7E00, 0x5000, 0xB400, 0xB000, 0x4C00, 0xB000,
+        0x6000, 0x5400, 0x1ED6, 0x1A31, 0x1D14, 0x183B, 0x1BC2, 0x16B2,
+        0x1A32, 0x15EF, 0x15EE, 0x1055, 0x1334, 0x0F2D, 0x11F6, 0x0C5D,
+        0x1056, 0x0AE1, 0x0AE0, 0x07A2, 0x0464, 0x0232, 0x8000, 0x8000,
+    },
+    {
+        /* Name: Chaos Echo, SPU mem required: 0x18040 */
+        0x0001, 0x0001, 0x7FFF, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x8100,
+        0x0000, 0x0000, 0x1FFF, 0x0FFF, 0x1005, 0x0005, 0x0000, 0x0000,
+        0x1005, 0x0005, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x1004, 0x1002, 0x0004, 0x0002, 0x8000, 0x8000,
+    },
+    {
+        /* Name: Delay, SPU mem required: 0x18040 */
+        0x0001, 0x0001, 0x7FFF, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x1FFF, 0x0FFF, 0x1005, 0x0005, 0x0000, 0x0000,
+        0x1005, 0x0005, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x1004, 0x1002, 0x0004, 0x0002, 0x8000, 0x8000,
+    },
+    {
+        /* Name: Off, SPU mem required: 0x10 */
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001,
+        0x0000, 0x0000, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001,
+        0x0000, 0x0000, 0x0001, 0x0001, 0x0001, 0x0001, 0x0000, 0x0000,
+    },
 };
