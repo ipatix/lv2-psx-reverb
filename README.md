@@ -25,6 +25,12 @@ Exposing the reverb registers directly as control ports would make the plugin al
 
 This plugin was originally based on the "Simple Amplifier" example plugin code.
 
+## Examples
+
+[Large Studio @ -5 dB wet](https://user-images.githubusercontent.com/8502545/107985750-f9cd7280-6fca-11eb-869c-4189c44ba8c2.mp4)
+
+[Clean](https://user-images.githubusercontent.com/8502545/107985125-baeaed00-6fc9-11eb-8d6c-42a298a2ce17.mp4)
+
 ## How to compile
 
 Install your distribution's `lv2-dev` package, init all submodules with `git submodule update --init` and run `./build.sh`.
