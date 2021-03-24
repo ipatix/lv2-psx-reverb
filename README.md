@@ -29,17 +29,25 @@ This plugin was originally based on the "Simple Amplifier" example plugin code.
 
 This is a demo with a Final Fantasy XII sequence. It's not a PSX game but it still sounds reasonable:
 
-**Large Studio @ -5 dB wet**: https://user-images.githubusercontent.com/8502545/107985750-f9cd7280-6fca-11eb-869c-4189c44ba8c2.mp4
+**Large Studio @ -5 dB wet**:
 
-**Clean**: https://user-images.githubusercontent.com/8502545/107985125-baeaed00-6fc9-11eb-8d6c-42a298a2ce17.mp4
+https://user-images.githubusercontent.com/8502545/107985750-f9cd7280-6fca-11eb-869c-4189c44ba8c2.mp4
+
+**Clean**:
+
+https://user-images.githubusercontent.com/8502545/107985125-baeaed00-6fc9-11eb-8d6c-42a298a2ce17.mp4
 
 The next one is from Final Fantasy IX and tries to mimic the original reverb settings as close as possible.
 It sounds somewhat different because unlike the real console, this code does downsample the reverb to 22050 Hz.
 But other than the additional brightness of the higher frequencies it sounds almost spot on to the original:
 
-**Large Studio @ -9.3 dB wet**: https://user-images.githubusercontent.com/8502545/112371228-a8f21d80-8cde-11eb-8ef5-dca29fb85383.mp4
+**Large Studio @ -9.3 dB wet**:
 
-**Clean**: https://user-images.githubusercontent.com/8502545/112371107-86f89b00-8cde-11eb-9b97-105547b498dd.mp4
+https://user-images.githubusercontent.com/8502545/112371228-a8f21d80-8cde-11eb-8ef5-dca29fb85383.mp4
+
+**Clean**:
+
+https://user-images.githubusercontent.com/8502545/112371107-86f89b00-8cde-11eb-9b97-105547b498dd.mp4
 
 For now I don't have examples of the other presets recorded, but the Large Studio is no doubt my favorite presets, followed by Hall.
 
