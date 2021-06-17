@@ -38,7 +38,7 @@ https://user-images.githubusercontent.com/8502545/107985750-f9cd7280-6fca-11eb-8
 https://user-images.githubusercontent.com/8502545/107985125-baeaed00-6fc9-11eb-8d6c-42a298a2ce17.mp4
 
 The next one is from Final Fantasy IX and tries to mimic the original reverb settings as close as possible.
-It sounds somewhat different because unlike the real console, this code does downsample the reverb to 22050 Hz.
+It sounds somewhat different because, unlike the real console, this code doesn't downsample the reverb to 22050 Hz.
 But other than the additional brightness of the higher frequencies it sounds almost spot on to the original:
 
 **Large Studio @ -9.3 dB wet**:
