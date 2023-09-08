@@ -56,3 +56,7 @@ For now I don't have examples of the other presets recorded, but the Large Studi
 Install your distribution's `lv2-dev` package, init all submodules with `git submodule update --init` and run `./build.sh`.
 This will automatically install the plugin to your home directory `~/.lv2` where most hosts will be able to find it.
 If you want to install it to somewhere else, change the `build.sh` script.
+
+## License
+
+Based on LV2, check COPYING for details.

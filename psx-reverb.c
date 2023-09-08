@@ -1,6 +1,7 @@
 /*
   Copyright 2006-2016 David Robillard <d@drobilla.net>
   Copyright 2006 Steve Harris <steve@plugin.org.uk>
+  Copyright 2023 Michael Panzlaff <michael.panlaff@fau.de>
 
   Permission to use, copy, modify, and/or distribute this software for any
   purpose with or without fee is hereby granted, provided that the above
